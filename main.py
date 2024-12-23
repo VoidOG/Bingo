@@ -6,61 +6,45 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # MongoDB setup
 client = MongoClient("mongodb+srv://Cenzo:Cenzo123@cenzo.azbk1.mongodb.net")
 db = client["bingo_bot"]
-users_collection = db["users"]
 games_collection = db["games"]
-leaderboard_collection = db["leaderboard"]
+players_collection = db["players"]
+global_board_collection = db["global_board"]
 
-# Owner ID
-OWNER_ID = "6663845789"
-
-# Generate a Bingo board
+# Game Setup
 def generate_board():
     numbers = random.sample(range(1, 26), 25)
     return [numbers[i:i + 5] for i in range(0, 25, 5)]
 
-# Format a Bingo board
+# Format board for inline display
 def format_board(board, marks):
     result = ""
     for i, row in enumerate(board):
         result += " | ".join(
-            f"*{num}*" if marks[i][j] else str(num)
+            f"✅ {num}" if marks[i][j] else f"{num}"
             for j, num in enumerate(row)
         ) + "\n"
     return result
-
-# Check for Bingo
-def check_bingo(marks):
-    # Horizontal and Vertical checks
-    for i in range(5):
-        if all(marks[i]) or all(row[i] for row in marks):
-            return True
-    # Diagonal checks
-    if all(marks[i][i] for i in range(5)) or all(marks[i][4 - i] for i in range(5)):
-        return True
-    return False
 
 # Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎉 Welcome to Bingo Bot! 🎉\n"
         "Commands:\n"
-        "• /start - Show instructions\n"
-        "• /join - Join a game\n"
-        "• /endgame - End the current game\n"
-        "• /broadcast - Broadcast a message (Owner only)\n"
-        "• /stats - Show bot statistics (Total groups, total users, total games)\n"
-        "• /leaderboard - View group leaderboard (Top 10 players)\n"
-        "• /globalboard - View global leaderboard (Top 10 players)\n"
-        "• /players - Show current game players\n"
-        "• /gamehelp - Show game instructions"
+        "/join - Join a game\n"
+        "/endgame - End the current game\n"
+        "/gamehelp - Show game rules\n"
+        "/leaderboard - Show leaderboard of top players\n"
+        "/globalboard - Show global board of players\n"
+        "/stats - View bot stats (groups, users, games)\n"
+        "/broadcast - Send a message to all users"
     )
 
-# Join command
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_id = str(update.effective_user.id)
     user_name = update.effective_user.first_name
 
+    # Check if game is already running
     game = games_collection.find_one({"chat_id": chat_id})
 
     if not game:
@@ -69,7 +53,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         games_collection.insert_one({
             "chat_id": chat_id,
             "players": {user_id: {"name": user_name, "board": board, "marks": marks}},
-            "turn": None,
+            "turn": user_id,
             "winner": None,
         })
         await update.message.reply_text(f"{user_name} has joined the game! Waiting for another player.")
@@ -80,7 +64,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(game["players"]) >= 2:
-        await update.message.reply_text("Two players are already in the game!")
+        await update.message.reply_text("Two players are already in the game! Please wait for the next round.")
         return
 
     board = generate_board()
@@ -96,6 +80,77 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await send_turn_notification(context.bot, chat_id, game)
 
+# Send turn notification
+async def send_turn_notification(bot, chat_id, game):
+    current_turn = game["turn"]
+    player_name = game["players"][current_turn]["name"]
+    board = game["players"][current_turn]["board"]
+    keyboard = [[InlineKeyboardButton(str(num), callback_data=str(num)) for num in row] for row in board]
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"{player_name}'s turn! Choose a number from your Bingo board.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_number_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    chat_id = str(update.effective_chat.id)
+    game = games_collection.find_one({"chat_id": chat_id})
+
+    # Check if game exists
+    if not game:
+        await query.answer("No game is currently running.")
+        return
+
+    # Check if the user is part of the game
+    if user_id not in game["players"]:
+        await query.answer("You are not playing the game! Please wait for your turn.")
+        return
+
+    # Check if it's the user's turn
+    if user_id != game["turn"]:
+        await query.answer("It's not your turn! Please wait for the current player to make a move.")
+        return
+
+    # Proceed with the number selection
+    selected_number = int(query.data)
+    player = game["players"][user_id]
+    board = player["board"]
+    marks = player["marks"]
+
+    # Mark the number on the player's board
+    for i, row in enumerate(board):
+        if selected_number in row:
+            marks[i][row.index(selected_number)] = True
+            break
+
+    # Mark one number on the opponent's board randomly
+    opponent_id = next(id for id in game["players"] if id != user_id)
+    opponent = game["players"][opponent_id]
+    opponent_board = opponent["board"]
+    opponent_marks = opponent["marks"]
+    unmarked_numbers = [(i, j) for i, row in enumerate(opponent_board) for j, num in enumerate(row) if not opponent_marks[i][j]]
+    if unmarked_numbers:
+        i, j = random.choice(unmarked_numbers)
+        opponent_marks[i][j] = True
+
+    # Check for Bingo
+    if check_bingo(marks):
+        game["winner"] = user_id
+        await query.message.reply_text(f"{player['name']} has won the game!")
+        games_collection.delete_one({"chat_id": chat_id})
+        return
+
+    # Update the game state
+    game["turn"] = opponent_id
+    games_collection.update_one({"chat_id": chat_id}, {"$set": game})
+
+    # Send the updated boards and turn notification
+    await send_turn_notification(context.bot, chat_id, game)
+    await query.answer(f"You selected {selected_number}")
+    
+
 # Endgame command
 async def endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -107,107 +162,65 @@ async def endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     games_collection.delete_one({"chat_id": chat_id})
     await update.message.reply_text("The current game has been ended.")
 
-# Broadcast command
+# Game help command
+async def gamehelp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎲 **How to play Bingo** 🎲\n"
+        "1. Join a game using /join.\n"
+        "2. Each player has a Bingo board. Choose a number from your board.\n"
+        "3. The opponent's board will be automatically updated.\n"
+        "4. Players alternate turns until one completes a row, column, or diagonal (Bingo).\n"
+        "5. The first player to get Bingo wins the game!\n"
+        "6. You can end the game anytime using /endgame."
+    )
+
+# Leaderboard command
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    top_players = players_collection.find().sort("score", -1).limit(10)
+    leaderboard_text = "🏆 **Leaderboard** 🏆\n"
+    for idx, player in enumerate(top_players, 1):
+        leaderboard_text += f"{idx}. {player['name']} - {player['score']} points\n"
+    await update.message.reply_text(leaderboard_text)
+
+# Global board command
+async def globalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global_players = global_board_collection.find().sort("score", -1).limit(10)
+    global_board_text = "🌍 **Global Leaderboard** 🌍\n"
+    for idx, player in enumerate(global_players, 1):
+        global_board_text += f"{idx}. {player['name']} - {player['score']} points\n"
+    await update.message.reply_text(global_board_text)
+
+# Stats command
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total_groups = len(games_collection.distinct("chat_id"))
+    total_users = len(players_collection.find())
+    total_games = games_collection.count_documents({})
+    await update.message.reply_text(
+        f"📊 **Bot Stats** 📊\n"
+        f"Total Groups: {total_groups}\n"
+        f"Total Users: {total_users}\n"
+        f"Total Games Played: {total_games}"
+    )
+
+# Broadcast command (Owner-only)
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != OWNER_ID:
+    if update.effective_user.id != 6663845789:  # Replace with your owner ID
         await update.message.reply_text("You are not authorized to use this command.")
         return
 
     message = " ".join(context.args)
     if not message:
-        await update.message.reply_text("Usage: /broadcast <message>")
+        await update.message.reply_text("Please provide a message to broadcast.")
         return
 
-    users = users_collection.find()
-    groups = games_collection.distinct("chat_id")
-
-    # Send message to all users
-    for user in users:
+    all_users = players_collection.find()
+    for user in all_users:
         try:
-            await context.bot.send_message(user["_id"], message)
-        except:
-            pass
-
-    # Send message to all groups
-    for group in groups:
-        try:
-            await context.bot.send_message(group, message)
-        except:
-            pass
-
-    await update.message.reply_text("Broadcast sent successfully!")
-
-# Stats command
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != OWNER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    # Get the total number of groups, users, and games
-    total_groups = len(games_collection.distinct("chat_id"))
-    total_users = users_collection.count_documents({})
-    total_games = games_collection.count_documents({})
-
-    await update.message.reply_text(
-        f"📊 Bot Statistics 📊\n"
-        f"• Total Groups: {total_groups}\n"
-        f"• Total Users: {total_users}\n"
-        f"• Total Games Played: {total_games}"
-    )
-
-# Players command
-async def players(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    game = games_collection.find_one({"chat_id": chat_id})
-
-    if not game or not game["players"]:
-        await update.message.reply_text("No players are currently in the game.")
-        return
-
-    player_details = "\n".join(
-        [f"• {player['name']} (User ID: {user_id})" for user_id, player in game["players"].items()]
-    )
-    await update.message.reply_text(f"Current players:\n{player_details}")
-
-# Leaderboard command (Top 10 players)
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    leaderboard = leaderboard_collection.find({"chat_id": chat_id}).sort("wins", -1).limit(10)
-
-    if leaderboard.count() == 0:
-        await update.message.reply_text("No leaderboard data for this group.")
-        return
-
-    text = "🏆 Group Leaderboard 🏆\n"
-    for rank, entry in enumerate(leaderboard, start=1):
-        text += f"{rank}. {entry['name']} - {entry['wins']} wins\n"
-    await update.message.reply_text(text)
-
-# Globalboard command (Top 10 players globally)
-async def globalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global_leaderboard = leaderboard_collection.find().sort("wins", -1).limit(10)
-
-    if global_leaderboard.count() == 0:
-        await update.message.reply_text("No global leaderboard data available.")
-        return
-
-    text = "🌐 Global Leaderboard 🌐\n"
-    for rank, entry in enumerate(global_leaderboard, start=1):
-        text += f"{rank}. {entry['name']} - {entry['wins']} wins\n"
-    await update.message.reply_text(text)
-
-# Game help command
-async def gamehelp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📝 Bingo Game Instructions 📝\n"
-        "1. Players will join the game by typing /join.\n"
-        "2. The game will start with 2 players.\n"
-        "3. Players will receive a Bingo board with random numbers (1 to 25).\n"
-        "4. Players take turns marking numbers from the board.\n"
-        "5. The first player to complete a row, column, or diagonal wins!\n"
-        "6. The winner is announced at the end of the game.\n"
-        "7. Type /endgame to end the game.\n"
-    )
+            await update.message.bot.send_message(user['user_id'], message)
+        except Exception as e:
+            print(f"Error sending message to {user['user_id']}: {e}")
+    
+    await update.message.reply_text("Broadcast message sent to all users.")
 
 # Main function
 def main():
@@ -216,12 +229,12 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("join", join))
     application.add_handler(CommandHandler("endgame", endgame))
-    application.add_handler(CommandHandler("broadcast", broadcast))
-    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("gamehelp", gamehelp))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
     application.add_handler(CommandHandler("globalboard", globalboard))
-    application.add_handler(CommandHandler("players", players))
-    application.add_handler(CommandHandler("gamehelp", gamehelp))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(CallbackQueryHandler(handle_number_selection))
 
     application.run_polling()
 
