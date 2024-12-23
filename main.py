@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # MongoDB setup
-client = MongoClient("")
+client = MongoClient("mongodb+srv://Cenzo:Cenzo123@cenzo.azbk1.mongodb.net")
 db = client["bingo_bot"]
 users_collection = db["users"]
 games_collection = db["games"]
