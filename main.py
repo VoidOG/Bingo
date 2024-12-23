@@ -38,6 +38,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/broadcast - Send a message to all users"
     )
 
+async def send_bingo_board(user_id, board):
+    # Format the Bingo board as a string to send in DM
+    board_text = ""
+    for row in board:
+        board_text += " | ".join(str(num) for num in row) + "\n"
+
+    # Send the board to the user via DM
+    try:
+        await context.bot.send_message(chat_id=user_id, text=f"Here is your Bingo board:\n\n{board_text}")
+    except Exception as e:
+        print(f"Error sending Bingo board: {e}")
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
