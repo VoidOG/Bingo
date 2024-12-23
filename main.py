@@ -38,7 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/broadcast - Send a message to all users"
     )
 
-async def send_bingo_board(user_id, board):
+async def send_bingo_board(update, context, user_id, board):
     # Format the Bingo board as a string to send in DM
     board_text = ""
     for row in board:
@@ -59,7 +59,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     board = generate_bingo_board()
 
     # Send the Bingo board to the player's DM
-    await send_bingo_board(user_id, board)
+    await send_bingo_board(update, context, user_id, board)
 
     # Add the player to the game
     game = games_collection.find_one({"chat_id": chat_id})
