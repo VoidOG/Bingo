@@ -45,7 +45,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
 
     # Generate the Bingo board for the player
-    board = generate_board()
+    board = generate_bingo_board()
 
     # Send the Bingo board to the player's DM
     await send_bingo_board(user_id, board)
