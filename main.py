@@ -10,20 +10,19 @@ games_collection = db["games"]
 players_collection = db["players"]
 global_board_collection = db["global_board"]
 
-# Game Setup
-def generate_board():
-    numbers = random.sample(range(1, 26), 25)
-    return [numbers[i:i + 5] for i in range(0, 25, 5)]
+def generate_bingo_board():
+    numbers = random.sample(range(1, 26), 25)  # Random numbers between 1 and 25
+    board = [numbers[i:i+5] for i in range(0, 25, 5)]  # Create a 5x5 grid
+    return board
 
-# Format board for inline display
-def format_board(board, marks):
-    result = ""
+# Function to mark a number on the board
+def mark_number_on_board(board, number):
     for i, row in enumerate(board):
-        result += " | ".join(
-            f"✅ {num}" if marks[i][j] else f"{num}"
-            for j, num in enumerate(row)
-        ) + "\n"
-    return result
+        for j, num in enumerate(row):
+            if num == number:
+                board[i][j] = None  # Mark as selected
+                return True
+    return False
 
 # Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,46 +38,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/broadcast - Send a message to all users"
     )
 
+
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
     user_id = str(update.effective_user.id)
+    chat_id = str(update.effective_chat.id)
     user_name = update.effective_user.first_name
 
-    # Check if game is already running
-    game = games_collection.find_one({"chat_id": chat_id})
-
-    if not game:
-        board = generate_board()
-        marks = [[False] * 5 for _ in range(5)]
-        games_collection.insert_one({
-            "chat_id": chat_id,
-            "players": {user_id: {"name": user_name, "board": board, "marks": marks}},
-            "turn": user_id,
-            "winner": None,
-        })
-        await update.message.reply_text(f"{user_name} has joined the game! Waiting for another player.")
-        return
-
-    if user_id in game["players"]:
-        await update.message.reply_text("You are already in the game!")
-        return
-
-    if len(game["players"]) >= 2:
-        await update.message.reply_text("Two players are already in the game! Please wait for the next round.")
-        return
-
+    # Generate the Bingo board for the player
     board = generate_board()
-    marks = [[False] * 5 for _ in range(5)]
-    game["players"][user_id] = {"name": user_name, "board": board, "marks": marks}
-    game["turn"] = list(game["players"].keys())[0]
+
+    # Send the Bingo board to the player's DM
+    await send_bingo_board(user_id, board)
+
+    # Add the player to the game
+    game = games_collection.find_one({"chat_id": chat_id})
+    if not game:
+        game = {"chat_id": chat_id, "players": {}, "turn": None, "winner": None}
+        games_collection.insert_one(game)
+
+    game["players"][user_id] = {"name": user_name, "board": board, "marks": [[False]*5 for _ in range(5)]}
+    game["turn"] = user_id
     games_collection.update_one({"chat_id": chat_id}, {"$set": game})
 
-    players = list(game["players"].values())
-    await update.message.reply_text(
-        f"{user_name} has joined the game!\nThe game is starting.\n"
-        f"It's {players[0]['name']}'s turn."
-    )
-    await send_turn_notification(context.bot, chat_id, game)
+    await update.message.reply_text(f"{user_name} has joined the game! It's your turn.")
+
+    # Notify the other player (if any) that the game has started
+    if len(game["players"]) == 2:
+        await update.message.reply_text("Both players are ready. The game is starting!")
 
 # Send turn notification
 async def send_turn_notification(bot, chat_id, game):
@@ -92,63 +78,55 @@ async def send_turn_notification(bot, chat_id, game):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def handle_number_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Function to handle number selection
+async def handle_number_selection(update, context):
     query = update.callback_query
     user_id = str(query.from_user.id)
-    chat_id = str(update.effective_chat.id)
-    game = games_collection.find_one({"chat_id": chat_id})
+    game = games_collection.find_one({"players": {"$in": [user_id]}})  # Find the game
 
-    # Check if game exists
     if not game:
         await query.answer("No game is currently running.")
         return
 
-    # Check if the user is part of the game
-    if user_id not in game["players"]:
-        await query.answer("You are not playing the game! Please wait for your turn.")
+    # Get current player's turn
+    current_player_id = game["turn"]
+    if user_id != current_player_id:
+        await query.answer("It's not your turn!")
         return
 
-    # Check if it's the user's turn
-    if user_id != game["turn"]:
-        await query.answer("It's not your turn! Please wait for the current player to make a move.")
-        return
-
-    # Proceed with the number selection
+    # Get selected number
     selected_number = int(query.data)
-    player = game["players"][user_id]
-    board = player["board"]
-    marks = player["marks"]
-
-    # Mark the number on the player's board
-    for i, row in enumerate(board):
-        if selected_number in row:
-            marks[i][row.index(selected_number)] = True
-            break
-
-    # Mark one number on the opponent's board randomly
-    opponent_id = next(id for id in game["players"] if id != user_id)
-    opponent = game["players"][opponent_id]
-    opponent_board = opponent["board"]
-    opponent_marks = opponent["marks"]
-    unmarked_numbers = [(i, j) for i, row in enumerate(opponent_board) for j, num in enumerate(row) if not opponent_marks[i][j]]
-    if unmarked_numbers:
-        i, j = random.choice(unmarked_numbers)
-        opponent_marks[i][j] = True
+    
+    # Update player's board in DM
+    player_board = game["players"][user_id]["board"]
+    mark_number_on_board(player_board, selected_number)
+    
+    # Update opponent's board with the same number at a random position
+    opponent_id = next(player for player in game["players"] if player != user_id)
+    opponent_board = game["players"][opponent_id]["board"]
+    mark_number_on_board(opponent_board, selected_number)
 
     # Check for Bingo
-    if check_bingo(marks):
+    if check_bingo(player_board):
         game["winner"] = user_id
-        await query.message.reply_text(f"{player['name']} has won the game!")
-        games_collection.delete_one({"chat_id": chat_id})
+        await query.message.reply_text(f"{query.from_user.first_name} has won the game!")
+        games_collection.delete_one({"chat_id": game["chat_id"]})  # End game
         return
 
-    # Update the game state
+    # Update game turn
     game["turn"] = opponent_id
-    games_collection.update_one({"chat_id": chat_id}, {"$set": game})
+    games_collection.update_one({"chat_id": game["chat_id"]}, {"$set": game})
 
-    # Send the updated boards and turn notification
-    await send_turn_notification(context.bot, chat_id, game)
-    await query.answer(f"You selected {selected_number}")
+    # Send updated board to each player in their DM
+    player_dm = await context.bot.send_message(user_id, "Your updated Bingo board:", reply_markup=generate_board_markup(player_board))
+    opponent_dm = await context.bot.send_message(opponent_id, "Your updated Bingo board:", reply_markup=generate_board_markup(opponent_board))
+
+    # Send updated turn notification
+    await query.answer(f"You selected {selected_number}. It's now {game['turn']}'s turn.")
+
+    # Send turn notification in group
+    await context.bot.send_message(game["chat_id"], f"Next turn: {game['turn']}!")
+    
     
 
 # Endgame command
